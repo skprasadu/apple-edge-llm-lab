@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/krishnasrinivasamurthy/my-applications/python/apple-edge-llm-lab/benches/torch_prefill_decode.py", line 135, in <module>
+    main()
+    ~~~~^^
+  File "/Users/krishnasrinivasamurthy/my-applications/python/apple-edge-llm-lab/benches/torch_prefill_decode.py", line 83, in main
+    apply_qwen2_gqa_broadcast_patch(verbose=True)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/krishnasrinivasamurthy/my-applications/python/apple-edge-llm-lab/patches/qwen2_gqa_broadcast_patch.py", line 98, in apply_qwen2_gqa_broadcast_patch
+    raise RuntimeError(
+    ...<3 lines>...
+    )
+RuntimeError: Could not find a Qwen2 attention class with an `_attn` method to patch.
+Candidates found in module: Qwen2Attention
+Run the inspector command below to see what's available.
