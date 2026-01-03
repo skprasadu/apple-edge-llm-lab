@@ -53,7 +53,7 @@ def main():
         sync(args.device)
         _ = model.generate(
             input_ids,
-            max_new_tokens=8,
+            max_new_tokens=args.new_tokens,
             do_sample=False,
             use_cache=True,
             cache_implementation=args.cache_impl,

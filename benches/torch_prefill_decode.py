@@ -51,7 +51,10 @@ def decode_loop(model, last_token, past_key_values, steps, progress_every=8):
             done = i + 1
             avg_ms = (sum(per_step[-progress_every:]) / progress_every) * 1000.0
             print(f"[progress] decode {done}/{steps} ({(done/steps)*100:.1f}%)  avg_step={avg_ms:.2f}ms")
-
+    
+    mx = max(per_step)
+    idx = per_step.index(mx) + 1
+    print(f"[debug] worst_step={mx*1000:.2f}ms at token={idx}")
     dt = time.perf_counter() - t0
     return dt
 
@@ -115,7 +118,7 @@ def main():
     for w in range(args.warmup):
         dt_prefill, pkv, logits = prefill(model, input_ids)
         last = torch.argmax(logits, dim=-1, keepdim=True)
-        dt_decode = decode_loop(model, last, pkv, steps=min(8, args.new_tokens), progress_every=0)
+        dt_decode = decode_loop(model, last, pkv, steps=args.new_tokens, progress_every=0)
         print(f"[warmup {w+1}/{args.warmup}] prefill={dt_prefill*1000:.2f}ms decode(8)={dt_decode*1000:.2f}ms")
 
     # Measure prefill
