@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import argparse
 import csv
 import re
@@ -33,6 +34,16 @@ def _resolve(p: str | Path) -> Path:
     p = Path(p)
     return p if p.is_absolute() else (ROOT / p)
 
+def _display_path(p: Path) -> str:
+    """
+    Render paths nicely for markdown:
+    - if under repo root, show repo-relative (no /Users/...)
+    - otherwise, fall back to absolute
+    """
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
 
 def _median(vals: list[float | None]) -> float | None:
     xs = [v for v in vals if v is not None]
@@ -257,7 +268,6 @@ def _make_summary_markdown(
     input_dir: Path,
     rows: list[dict[str, object]],
     meta: dict[str, str],
-    devices: dict[str, str],
 ) -> str:
     def first(field: str) -> str:
         for r in rows:
@@ -295,7 +305,7 @@ def _make_summary_markdown(
 
     env_bits = []
     for k in ("platform", "python", "torch", "transformers"):
-        v = devices.get(k)
+        v = meta.get(k)
         if v:
             env_bits.append(f"{k}={v}")
     if env_bits:
@@ -311,7 +321,7 @@ def _make_summary_markdown(
     if meta.get("notes"):
         lines.append(f"**Notes:** {meta.get('notes')}  ")
 
-    lines.append(f"**Raw logs:** `{input_dir}`\n")
+    lines.append(f"**Raw logs:** `{_display_path(input_dir)}`\n")
 
     lines.append("### Prefill + decode (median over runs)\n")
     lines.append(
@@ -412,9 +422,8 @@ def main() -> None:
             w.writerow(r)
 
     meta = _read_kv_file(input_dir / "meta.txt")
-    devices = _read_kv_file(ROOT / "docs/devices.md")
 
-    md_text = _make_summary_markdown(run_id=run_id, input_dir=input_dir, rows=rows, meta=meta, devices=devices)
+    md_text = _make_summary_markdown(run_id=run_id, input_dir=input_dir, rows=rows, meta=meta)
     out_md.write_text(md_text)
 
     # Per-run outputs for history

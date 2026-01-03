@@ -22,10 +22,22 @@ NOTES="${NOTES:-}"
 OUT_DIR="${OUT_DIR:-results/raw/${TS}}"
 mkdir -p "${OUT_DIR}"
 
+# Absolute progress (counts baseline+gqa as ONE unit; matches 1/60 expectation)
+NUM_PL=${#PROMPT_LENS[@]}
+NUM_NT=${#NEW_TOKENS_LIST[@]}
+NUM_CACHE=${#CACHE_IMPLS[@]}
+TOTAL_PAIRS=$(( NUM_PL * NUM_NT * RUNS * (1 + NUM_CACHE) ))
+PAIR=0
+progress_pair () {
+  PAIR=$((PAIR + 1))
+  echo "[progress] ${PAIR}/${TOTAL_PAIRS} $*"
+}
+
 echo "Writing logs to: ${OUT_DIR}"
 echo "MODEL=${MODEL} DEVICE=${DEVICE} DTYPE=${DTYPE} ATTN=${ATTN} RUNS=${RUNS} WARMUP=${WARMUP}"
 echo "RUN_ID=${TS}"
 echo "OUT_DIR=${OUT_DIR}"
+echo "[progress] total_pairs=${TOTAL_PAIRS} (each pair runs baseline+gqa)"
 
 # Repro snapshot for this run (parse_results.py will pick this up)
 META="${OUT_DIR}/meta.txt"
@@ -41,6 +53,12 @@ META="${OUT_DIR}/meta.txt"
   echo "new_tokens_list=${NEW_TOKENS_LIST[*]}"
   echo "cache_impls=${CACHE_IMPLS[*]}"
   echo "notes=${NOTES}"
+
+  # Runtime environment snapshot (no manual device.md needed)
+  echo "platform=$(python -c 'import platform; print(platform.platform())')"
+  echo "python=$(python -c 'import sys; print(sys.version.split()[0])')"
+  echo "torch=$(python -c 'import torch; print(torch.__version__)')"
+  echo "transformers=$(python -c 'import transformers; print(transformers.__version__)')"
 
   if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "git_sha=$(git rev-parse --short HEAD)"
@@ -97,19 +115,21 @@ run_cache_generate () {
 for pl in "${PROMPT_LENS[@]}"; do
   for nt in "${NEW_TOKENS_LIST[@]}"; do
     for run in $(seq 1 "${RUNS}"); do
-      echo "[prefill_decode] baseline pl=${pl} nt=${nt} run=${run}"
+      progress_pair "prefill_decode pl=${pl} nt=${nt} run=${run}"
+      echo "  -> baseline"
       run_prefill_decode baseline "${pl}" "${nt}" "${run}"
 
-      echo "[prefill_decode] gqa      pl=${pl} nt=${nt} run=${run}"
+      echo "  -> gqa"
       run_prefill_decode gqa "${pl}" "${nt}" "${run}"
     done
 
     for cache in "${CACHE_IMPLS[@]}"; do
       for run in $(seq 1 "${RUNS}"); do
-        echo "[cache_generate] baseline cache=${cache} pl=${pl} nt=${nt} run=${run}"
+        progress_pair "cache_generate cache=${cache} pl=${pl} nt=${nt} run=${run}"
+        echo "  -> baseline"
         run_cache_generate baseline "${cache}" "${pl}" "${nt}" "${run}"
 
-        echo "[cache_generate] gqa      cache=${cache} pl=${pl} nt=${nt} run=${run}"
+        echo "  -> gqa"
         run_cache_generate gqa "${cache}" "${pl}" "${nt}" "${run}"
       done
     done

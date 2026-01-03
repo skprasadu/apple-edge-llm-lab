@@ -11,3 +11,4 @@ wheels/
 
 **/raw
 results/summary/*.csv
+config/bench.env
