@@ -24,6 +24,10 @@ RE_DEV = re.compile(r"^device=(\S+)\s+dtype=(\S+)\s+attn=(\S+)")
 RE_PROGRESS = re.compile(r"avg_step=([0-9.]+)ms")
 RE_WORST = re.compile(r"^\[debug\]\s+worst_step=([0-9.]+)ms\s+at token=(\d+)")
 RE_PROMPT = re.compile(r"^prompt_len=(\d+)\s+new_tokens=(\d+)$")
+RE_MEM_MODEL = re.compile(r"^mem_model_bytes=(\d+)$")
+RE_MEM_PREFILL = re.compile(r"^mem_prefill_peak_bytes=(\d+)$")
+RE_MEM_DECODE = re.compile(r"^mem_decode_peak_bytes=(\d+)$")
+RE_MEM_GENERATE = re.compile(r"^mem_generate_peak_bytes=(\d+)$")
 
 RE_FILE_PREFILL = re.compile(r"^torch_prefill_decode__([a-zA-Z0-9]+)__pl(\d+)__nt(\d+)__run(\d+)\.txt$")
 RE_FILE_CACHE = re.compile(r"^torch_cache_generate__([a-zA-Z0-9]+)__cache([a-zA-Z0-9]+)__pl(\d+)__nt(\d+)__run(\d+)\.txt$")
@@ -130,6 +134,14 @@ def parse_file(path: Path) -> dict[str, object] | None:
         "worst_step_token": None,
         "total_s": None,
         "end_to_end_tok_s": None,
+        "mem_model_bytes": None,
+        "mem_prefill_peak_bytes": None,
+        "mem_decode_peak_bytes": None,
+        "mem_generate_peak_bytes": None,
+        "mem_prefill_peak_mb": None,
+        "mem_prefill_delta_mb": None,
+        "mem_generate_peak_mb": None,
+        "mem_generate_delta_mb": None,
     }
 
     txt = path.read_text(errors="replace").splitlines()
@@ -227,8 +239,43 @@ def parse_file(path: Path) -> dict[str, object] | None:
         if m:
             row["worst_step_ms"] = float(m.group(1))
             row["worst_step_token"] = int(m.group(2))
+            continue
 
+        m = RE_MEM_MODEL.match(line)
+        if m:
+            row["mem_model_bytes"] = int(m.group(1))
+            continue
+        m = RE_MEM_PREFILL.match(line)
+        if m:
+            row["mem_prefill_peak_bytes"] = int(m.group(1))
+            continue
+        m = RE_MEM_DECODE.match(line)
+        if m:
+            row["mem_decode_peak_bytes"] = int(m.group(1))
+            continue
+        m = RE_MEM_GENERATE.match(line)
+        if m:
+            row["mem_generate_peak_bytes"] = int(m.group(1))
+            continue
     row["avg_step_ms_last"] = last_avg
+
+    # Derive MB and deltas (delta = peak - mem_model_bytes) if available.
+    MB = 1024 * 1024
+    base = row.get("mem_model_bytes")
+    base_i = base if isinstance(base, int) else None
+
+    pre_b = row.get("mem_prefill_peak_bytes")
+    if isinstance(pre_b, int):
+        row["mem_prefill_peak_mb"] = pre_b / MB
+        if base_i is not None:
+            row["mem_prefill_delta_mb"] = (pre_b - base_i) / MB
+
+    gen_b = row.get("mem_generate_peak_bytes")
+    if isinstance(gen_b, int):
+        row["mem_generate_peak_mb"] = gen_b / MB
+        if base_i is not None:
+            row["mem_generate_delta_mb"] = (gen_b - base_i) / MB
+
     return row
 
 
@@ -327,11 +374,11 @@ def _make_summary_markdown(
 
     lines.append("### Prefill + decode (median over runs)\n")
     lines.append(
-        "| prompt_len | new_tokens | n_baseline | prefill_ms_base | decode_tok/s_base | worst_step_ms_base | "
-        "n_gqa | prefill_ms_gqa | decode_tok/s_gqa | worst_step_ms_gqa | "
+        "| prompt_len | new_tokens | n_baseline | prefill_ms_base | decode_tok/s_base | worst_step_ms_base | worst_tok_base | "
+        "n_gqa | prefill_ms_gqa | decode_tok/s_gqa | worst_step_ms_gqa | worst_tok_gqa | "
         "prefill_speedup | decode_speedup |"
     )
-    lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
 
     for key in sorted(pre_groups.keys(), key=lambda k: (k[0] is None, k[0], k[1] is None, k[1])):
         pl, nt = key
@@ -341,17 +388,23 @@ def _make_summary_markdown(
         b_prefill = _median([x.get("prefill_ms") for x in b])  # type: ignore[arg-type]
         b_decode = _median([x.get("decode_tok_s") for x in b])  # type: ignore[arg-type]
         b_worst = _median([x.get("worst_step_ms") for x in b])  # type: ignore[arg-type]
+        b_worst_tok = _median(
+            [float(v) if isinstance((v := x.get("worst_step_token")), (int, float)) else None for x in b]  # type: ignore[misc]
+        )
 
         g_prefill = _median([x.get("prefill_ms") for x in g])  # type: ignore[arg-type]
         g_decode = _median([x.get("decode_tok_s") for x in g])  # type: ignore[arg-type]
         g_worst = _median([x.get("worst_step_ms") for x in g])  # type: ignore[arg-type]
+        g_worst_tok = _median(
+            [float(v) if isinstance((v := x.get("worst_step_token")), (int, float)) else None for x in g]  # type: ignore[misc]
+        )
 
         pre_su = _speedup_time(b_prefill, g_prefill)
         dec_su = _speedup_rate(b_decode, g_decode)
 
         lines.append(
-            f"| {_fmt(pl,0)} | {_fmt(nt,0)} | {len(b)} | {_fmt(b_prefill)} | {_fmt(b_decode)} | {_fmt(b_worst)} | "
-            f"{len(g)} | {_fmt(g_prefill)} | {_fmt(g_decode)} | {_fmt(g_worst)} | "
+            f"| {_fmt(pl,0)} | {_fmt(nt,0)} | {len(b)} | {_fmt(b_prefill)} | {_fmt(b_decode)} | {_fmt(b_worst)} | {_fmt(b_worst_tok,0)} | "
+            f"{len(g)} | {_fmt(g_prefill)} | {_fmt(g_decode)} | {_fmt(g_worst)} | {_fmt(g_worst_tok,0)} | "
             f"{_fmt(pre_su)}x | {_fmt(dec_su)}x |"
         )
 

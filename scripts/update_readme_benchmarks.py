@@ -185,6 +185,10 @@ def main() -> int:
     # headline: end-to-end generate() tok/s
     base_gen = []
     gqa_gen = []
+    base_gen_mem = []
+    gqa_gen_mem = []
+    base_pre_mem = []
+    gqa_pre_mem = []
 
     # headline: prefill ms (prefill_decode bench)
     base_prefill = []
@@ -222,6 +226,13 @@ def main() -> int:
             elif r.get("variant") == "gqa":
                 gqa_gen.append(_to_float(v))
 
+            mv = (r.get("mem_generate_delta_mb") or r.get("mem_generate_peak_mb") or "").strip()
+            if mv:
+                if r.get("variant") == "baseline":
+                    base_gen_mem.append(_to_float(mv))
+                elif r.get("variant") == "gqa":
+                    gqa_gen_mem.append(_to_float(mv))
+
         # Parse headline prefill_ms from prefill_decode
         if r.get("bench") == "prefill_decode":
             if not r.get("prompt_len") or not r.get("new_tokens"):
@@ -237,6 +248,13 @@ def main() -> int:
                 base_prefill.append(_to_float(v))
             elif r.get("variant") == "gqa":
                 gqa_prefill.append(_to_float(v))
+
+            mv = (r.get("mem_prefill_delta_mb") or r.get("mem_prefill_peak_mb") or "").strip()
+            if mv:
+                if r.get("variant") == "baseline":
+                    base_pre_mem.append(_to_float(mv))
+                elif r.get("variant") == "gqa":
+                    gqa_pre_mem.append(_to_float(mv))
 
     if not model or not device or not dtype:
         raise SystemExit(
@@ -266,6 +284,14 @@ def main() -> int:
     gqa_prefill_med = _med(gqa_prefill)
     prefill_speedup = base_prefill_med / gqa_prefill_med if gqa_prefill_med > 0 else float("inf")
 
+    base_gen_mem_med = _med(base_gen_mem) if base_gen_mem else None
+    gqa_gen_mem_med = _med(gqa_gen_mem) if gqa_gen_mem else None
+    gen_mem_saving = (base_gen_mem_med / gqa_gen_mem_med) if (base_gen_mem_med and gqa_gen_mem_med and gqa_gen_mem_med > 0) else None
+
+    base_pre_mem_med = _med(base_pre_mem) if base_pre_mem else None
+    gqa_pre_mem_med = _med(gqa_pre_mem) if gqa_pre_mem else None
+    pre_mem_saving = (base_pre_mem_med / gqa_pre_mem_med) if (base_pre_mem_med and gqa_pre_mem_med and gqa_pre_mem_med > 0) else None
+
     sha, dirty = _git_meta()
     git_str = sha + ("*" if dirty else "")
 
@@ -273,19 +299,28 @@ def main() -> int:
     run_link = f"[{args.run_id}](results/summary/{args.run_id}.md)"
 
     headline = f"{pl}/{nt}/{cache}"
+    def _fmt_opt(x: float | None, nd: int) -> str:
+        if x is None:
+            return ""
+        return f"{x:.{nd}f}"
 
     row_line = (
         f"| {run_link} | {model} | {device}/{dtype} | {headline} | "
         f"{base_gen_med:.2f} | {gqa_gen_med:.2f} | {gen_speedup:.2f}x | "
+        f"{_fmt_opt(base_gen_mem_med,1)} | {_fmt_opt(gqa_gen_mem_med,1)} | {_fmt_opt(gen_mem_saving,2)}x | "
         f"{base_prefill_med:.0f} | {gqa_prefill_med:.0f} | {prefill_speedup:.2f}x | "
+        f"{_fmt_opt(base_pre_mem_med,1)} | {_fmt_opt(gqa_pre_mem_med,1)} | {_fmt_opt(pre_mem_saving,2)}x | "
         f"{git_str} |"
     )
 
     header = (
         "| run | model | device | headline(pl/nt/cache) | gen tok/s (base) | gen tok/s (gqa) | gen speedup | "
-        "prefill ms (base) | prefill ms (gqa) | prefill speedup | git |\n"
+        "gen mem ΔMB (base) | gen mem ΔMB (gqa) | gen mem saving | "
+        "prefill ms (base) | prefill ms (gqa) | prefill speedup | "
+        "prefill mem ΔMB (base) | prefill mem ΔMB (gqa) | prefill mem saving | "
+        "git |\n"
     )
-    align = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+    align = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n"
     expected_cols = len(_split_md_row(header))
 
     sec_lines = [ln for ln in section.strip("\n").splitlines() if ln.strip()]

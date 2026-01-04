@@ -4,9 +4,9 @@ import argparse
 import time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional
 import benches._bootstrap  # noqa: F401
 from patches.transformers_no_flash_attn import no_flash_attn_imports
-
 
 def sync(device: str):
     # GPU backends are often async; synchronize for accurate timing.
@@ -15,6 +15,20 @@ def sync(device: str):
     elif device.startswith("cuda"):
         torch.cuda.synchronize()
 
+def _mem_bytes(device: str) -> Optional[int]:
+    if device == "mps":
+        fn = getattr(torch.mps, "driver_allocated_memory", None) or getattr(torch.mps, "current_allocated_memory", None)
+        if fn:
+            return int(fn())
+        return None
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return int(torch.cuda.memory_allocated())
+    return None
+
+def _mem_peak_bytes(device: str) -> Optional[int]:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return int(torch.cuda.max_memory_allocated())
+    return _mem_bytes(device)
 
 @torch.inference_mode()
 def prefill(model, input_ids):
@@ -102,6 +116,11 @@ def main():
     model.eval()
 
     print(f"attn={attn_impl}")
+
+    sync(args.device)
+    mm = _mem_bytes(args.device)
+    if mm is not None: print(f"mem_model_bytes={mm}")
+
     # Create a fixed-length prompt (no tokenization variance).
     vocab = getattr(model.config, "vocab_size", None)
     if vocab is None:
@@ -124,15 +143,27 @@ def main():
         print(f"[warmup {w+1}/{args.warmup}] prefill={dt_prefill*1000:.2f}ms decode({warm_nt})={dt_decode*1000:.2f}ms")
 
     # Measure prefill
+    if args.device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     dt_prefill, pkv, logits = prefill(model, input_ids)
     last = torch.argmax(logits, dim=-1, keepdim=True)
+    mem_prefill_peak = _mem_peak_bytes(args.device)
+    if mem_prefill_peak is not None:
+        print(f"mem_prefill_peak_bytes={mem_prefill_peak}")
 
     # Measure decode
+    if args.device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     dt_decode = decode_loop(
         model, last, pkv,
         steps=args.new_tokens,
         progress_every=args.progress_every
     )
+    mem_decode_peak = _mem_peak_bytes(args.device)
+    if mem_decode_peak is not None:
+        print(f"mem_decode_peak_bytes={mem_decode_peak}")
 
     tok_s = args.new_tokens / dt_decode if dt_decode > 0 else float("inf")
 

@@ -1,6 +1,7 @@
 import argparse, time
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional
 import benches._bootstrap  # noqa: F401
 from patches.transformers_no_flash_attn import no_flash_attn_imports
 
@@ -9,6 +10,22 @@ def sync(device: str):
         torch.mps.synchronize()
     elif device.startswith("cuda"):
         torch.cuda.synchronize()
+
+def _mem_bytes(device: str) -> Optional[int]:
+    # We keep this intentionally tiny + deterministic (no psutil).
+    if device == "mps":
+        fn = getattr(torch.mps, "driver_allocated_memory", None) or getattr(torch.mps, "current_allocated_memory", None)
+        if fn:
+            return int(fn())
+        return None
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return int(torch.cuda.memory_allocated())
+    return None
+
+def _mem_peak_bytes(device: str) -> Optional[int]:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        return int(torch.cuda.max_memory_allocated())
+    return _mem_bytes(device)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -44,6 +61,11 @@ def main():
     ).to(args.device)
     model.eval()
     print(f"attn={attn_impl}")
+
+    sync(args.device)
+    mm = _mem_bytes(args.device)
+    if mm is not None: print(f"mem_model_bytes={mm}")
+
     vocab = model.config.vocab_size
     input_ids = torch.randint(0, vocab, (1, args.prompt_len), device=args.device, dtype=torch.long)
     attention_mask = torch.ones_like(input_ids, device=args.device)
@@ -65,6 +87,9 @@ def main():
         sync(args.device)
 
     # Timed
+    if args.device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
     sync(args.device)
     t0 = time.perf_counter()
     out = model.generate(
@@ -80,6 +105,9 @@ def main():
     )
     sync(args.device)
     t1 = time.perf_counter()
+    mp = _mem_peak_bytes(args.device)
+    if mp is not None:
+        print(f"mem_generate_peak_bytes={mp}")
 
     total = t1 - t0
     print(f"cache_impl={args.cache_impl} prompt_len={args.prompt_len} new_tokens={args.new_tokens}")
