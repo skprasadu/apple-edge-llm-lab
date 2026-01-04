@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import subprocess
 import sys
@@ -10,6 +11,40 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _csv_has_bench(csv_path: Path, bench_name: str) -> bool:
+    if not csv_path.exists():
+        return False
+    with csv_path.open(newline="") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            if (row.get("bench") or "").strip() == bench_name:
+                return True
+    return False
+
+def _ws_list(s: str | None) -> list[str]:
+    return [x for x in (s or "").strip().split() if x]
+
+def _env_int(env: dict[str, str], key: str) -> int | None:
+    v = (env.get(key) or "").strip()
+    if not v:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        raise SystemExit(f"ERROR: {key} must be an int in bench.env, got: {v!r}")
+
+def _env_int_list(env: dict[str, str], key: str, *, default: list[int]) -> list[int]:
+    raw = (env.get(key) or "").strip()
+    if not raw:
+        return default
+    out: list[int] = []
+    for tok in raw.split():
+        try:
+            out.append(int(tok))
+        except ValueError:
+            raise SystemExit(f"ERROR: {key} must be space-separated ints in bench.env, got token={tok!r}")
+    return out
 
 def _read_env_file(path: Path) -> dict[str, str]:
     """
@@ -42,19 +77,46 @@ def _read_env_file(path: Path) -> dict[str, str]:
         out[k] = v
     return out
 
-
-def _env_int(env: dict[str, str], key: str) -> int | None:
-    v = (env.get(key) or "").strip()
-    if not v:
-        return None
-    try:
-        return int(v)
-    except ValueError:
-        raise SystemExit(f"ERROR: {key} must be an int in bench.env, got: {v!r}")
-
 def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
     print("+ " + " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=ROOT, env=env, check=True)
+
+def _preflight_publish_config(cfg: dict[str, str], *, no_readme: bool) -> None:
+    """
+    Deterministic contract:
+      - If we're publishing (no_readme=False), BENCHES MUST include both benches
+        because README row requires both generate + prefill metrics.
+      - Fail BEFORE running the matrix.
+    """
+    if no_readme:
+        return
+
+    benches = _ws_list(cfg.get("BENCHES")) or ["prefill_decode", "cache_generate"]
+    missing = [b for b in ("prefill_decode", "cache_generate") if b not in benches]
+    if missing:
+        raise SystemExit(
+            "ERROR: This is a publish run (README update enabled), but BENCHES is missing required benches.\n"
+            f"Required: prefill_decode + cache_generate\n"
+            f"Found   : {benches}\n"
+            "Fix: set BENCHES=\"prefill_decode cache_generate\" in config/bench.env\n"
+            "     (or run a debug run with --no-readme)\n"
+        )
+
+    # Optional but useful: validate headline values if explicitly set.
+    prompt_lens = _env_int_list(cfg, "PROMPT_LENS", default=[1024, 2048, 4096])
+    new_tokens  = _env_int_list(cfg, "NEW_TOKENS_LIST", default=[32, 64])
+    caches      = _ws_list(cfg.get("CACHE_IMPLS")) or ["dynamic"]
+
+    h_pl = _env_int(cfg, "HEADLINE_PROMPT_LEN")
+    h_nt = _env_int(cfg, "HEADLINE_NEW_TOKENS")
+    h_ca = (cfg.get("HEADLINE_CACHE_IMPL") or "dynamic").strip()
+
+    if h_pl and h_pl not in prompt_lens:
+        raise SystemExit(f"ERROR: HEADLINE_PROMPT_LEN={h_pl} not in PROMPT_LENS={prompt_lens}")
+    if h_nt and h_nt not in new_tokens:
+        raise SystemExit(f"ERROR: HEADLINE_NEW_TOKENS={h_nt} not in NEW_TOKENS_LIST={new_tokens}")
+    if h_ca and h_ca not in caches:
+        raise SystemExit(f"ERROR: HEADLINE_CACHE_IMPL={h_ca!r} not in CACHE_IMPLS={caches}")
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run benchmark matrix + parse + update README.")
@@ -90,6 +152,9 @@ def main() -> int:
     cfg = _read_env_file(env_path)
     env.update(cfg)
 
+    # Fail fast if this run is expected to publish.
+    _preflight_publish_config(cfg, no_readme=args.no_readme)
+
     env["TS"] = run_id
     env["OUT_DIR"] = str(out_dir)
     # Headline defaults from bench.env, unless CLI explicitly set.
@@ -105,10 +170,13 @@ def main() -> int:
         args.headline_cache_impl = (cfg.get("HEADLINE_CACHE_IMPL") or "dynamic").strip()
     if not args.headline_cache_impl:
         args.headline_cache_impl = "dynamic"
-
+    
+    env["PYTHON"] = sys.executable
+    print(f"[stage 1/3] running benchmark matrix (run_id={run_id})", flush=True)
     # 1) Run the full matrix
     _run(["bash", "scripts/run_matrix.sh"], env=env)
 
+    print("[stage 2/3] parsing logs", flush=True)
     # 2) Parse into timestamped artifacts
     _run(
         [
@@ -126,28 +194,29 @@ def main() -> int:
             "Check scripts/parse_results.py output paths."
         )
 
-    # 4) Update root README with a single row for this run
-    if not args.no_readme:
-        _run(
-            [
-                sys.executable,
-                "scripts/update_readme_benchmarks.py",
-                "--readme",
-                args.readme,
-                "--run-id",
-                run_id,
-                "--csv",
-                str(csv_out),
-                "--md",
-                str(md_out),
-                "--headline-prompt-len",
-                str(args.headline_prompt_len),
-                "--headline-new-tokens",
-                str(args.headline_new_tokens),
-                "--headline-cache-impl",
-                args.headline_cache_impl,
-            ]
-        )
+    if args.no_readme:
+        print("[stage 3/3] skipping README update (--no-readme)", flush=True)
+    else:
+        # Sanity: publish run MUST have both benches in CSV.
+        if not _csv_has_bench(csv_out, "cache_generate") or not _csv_has_bench(csv_out, "prefill_decode"):
+            raise SystemExit(
+                "ERROR: Publish run expected both benches in CSV, but at least one is missing.\n"
+                f"CSV: {csv_out}\n"
+                "Check raw logs for failures.\n"
+            )
+
+        print("[stage 3/3] updating README", flush=True)
+        _run([
+            sys.executable,
+            "scripts/update_readme_benchmarks.py",
+            "--readme", args.readme,
+            "--run-id", run_id,
+            "--csv", str(csv_out),
+            "--md", str(md_out),
+            "--headline-prompt-len", str(args.headline_prompt_len),
+            "--headline-new-tokens", str(args.headline_new_tokens),
+            "--headline-cache-impl", args.headline_cache_impl,
+        ])
 
     print("")
     print("Done.")
@@ -155,7 +224,6 @@ def main() -> int:
     print(f"Summary  : {md_out}")
     print(f"CSV      : {csv_out}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

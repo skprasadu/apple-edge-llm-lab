@@ -320,6 +320,8 @@ def _make_summary_markdown(
         lines.append(f"**Runs:** {meta.get('runs','')}  **Warmup:** {meta.get('warmup','')}  ")
     if meta.get("notes"):
         lines.append(f"**Notes:** {meta.get('notes')}  ")
+    if meta.get("benches"):
+        lines.append(f"**Benches:** `{meta.get('benches')}`  ")
 
     lines.append(f"**Raw logs:** `{_display_path(input_dir)}`\n")
 

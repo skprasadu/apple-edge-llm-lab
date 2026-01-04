@@ -67,6 +67,7 @@ def main():
     ap.add_argument("--prompt-len", type=int, default=2048)
     ap.add_argument("--new-tokens", type=int, default=64)
     ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument("--warmup-decode-tokens", type=int, default=8, help="During warmup, decode only this many tokens (keeps warmup stable vs new_tokens).")
     ap.add_argument("--progress-every", type=int, default=8)
     ap.add_argument("--gqa-broadcast", action="store_true",
                 help="Patch Qwen2 SDPA attention to avoid KV repeat (MPS only).")
@@ -118,8 +119,9 @@ def main():
     for w in range(args.warmup):
         dt_prefill, pkv, logits = prefill(model, input_ids)
         last = torch.argmax(logits, dim=-1, keepdim=True)
-        dt_decode = decode_loop(model, last, pkv, steps=args.new_tokens, progress_every=0)
-        print(f"[warmup {w+1}/{args.warmup}] prefill={dt_prefill*1000:.2f}ms decode(8)={dt_decode*1000:.2f}ms")
+        warm_nt = min(int(args.new_tokens), int(args.warmup_decode_tokens))
+        dt_decode = decode_loop(model, last, pkv, steps=warm_nt, progress_every=0)
+        print(f"[warmup {w+1}/{args.warmup}] prefill={dt_prefill*1000:.2f}ms decode({warm_nt})={dt_decode*1000:.2f}ms")
 
     # Measure prefill
     dt_prefill, pkv, logits = prefill(model, input_ids)

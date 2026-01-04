@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PY="${PYTHON:-python}"
 TS="${TS:-$(date +%Y%m%d_%H%M%S)}"
 MODEL="${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 DEVICE="${DEVICE:-mps}"
@@ -11,13 +12,23 @@ ATTN="${ATTN:-sdpa}"
 PROMPT_LENS=(${PROMPT_LENS:-1024 2048 4096})
 NEW_TOKENS_LIST=(${NEW_TOKENS_LIST:-32 64})
 CACHE_IMPLS=(${CACHE_IMPLS:-dynamic})
+BENCHES=(${BENCHES:-prefill_decode cache_generate})
 
 RUNS="${RUNS:-5}"
 WARMUP="${WARMUP:-2}"
+WARMUP_DECODE_TOKENS="${WARMUP_DECODE_TOKENS:-8}"
 
 # Optional: add a one-line note per run:
 #   NOTES="gqa-broadcast on; testing cache=dynamic" bash scripts/run_matrix.sh
 NOTES="${NOTES:-}"
+
+has_bench () {
+  local x="$1"
+  for b in "${BENCHES[@]}"; do
+    [[ "$b" == "$x" ]] && return 0
+  done
+  return 1
+}
 
 OUT_DIR="${OUT_DIR:-results/raw/${TS}}"
 mkdir -p "${OUT_DIR}"
@@ -26,7 +37,16 @@ mkdir -p "${OUT_DIR}"
 NUM_PL=${#PROMPT_LENS[@]}
 NUM_NT=${#NEW_TOKENS_LIST[@]}
 NUM_CACHE=${#CACHE_IMPLS[@]}
-TOTAL_PAIRS=$(( NUM_PL * NUM_NT * RUNS * (1 + NUM_CACHE) ))
+
+MULT=0
+if has_bench prefill_decode; then MULT=$((MULT + 1)); fi
+if has_bench cache_generate; then MULT=$((MULT + NUM_CACHE)); fi
+if [[ "${MULT}" -le 0 ]]; then
+  echo "ERROR: BENCHES is empty/invalid. Use BENCHES=\"prefill_decode\" and/or BENCHES=\"cache_generate\""
+  exit 1
+fi
+TOTAL_PAIRS=$(( NUM_PL * NUM_NT * RUNS * MULT ))
+
 PAIR=0
 progress_pair () {
   PAIR=$((PAIR + 1))
@@ -37,6 +57,7 @@ echo "Writing logs to: ${OUT_DIR}"
 echo "MODEL=${MODEL} DEVICE=${DEVICE} DTYPE=${DTYPE} ATTN=${ATTN} RUNS=${RUNS} WARMUP=${WARMUP}"
 echo "RUN_ID=${TS}"
 echo "OUT_DIR=${OUT_DIR}"
+echo "BENCHES=${BENCHES[*]}"
 echo "[progress] total_pairs=${TOTAL_PAIRS} (each pair runs baseline+gqa)"
 
 # Repro snapshot for this run (parse_results.py will pick this up)
@@ -52,13 +73,15 @@ META="${OUT_DIR}/meta.txt"
   echo "prompt_lens=${PROMPT_LENS[*]}"
   echo "new_tokens_list=${NEW_TOKENS_LIST[*]}"
   echo "cache_impls=${CACHE_IMPLS[*]}"
+  echo "benches=${BENCHES[*]}"
+  echo "warmup_decode_tokens=${WARMUP_DECODE_TOKENS}"
   echo "notes=${NOTES}"
 
   # Runtime environment snapshot (no manual device.md needed)
-  echo "platform=$(python -c 'import platform; print(platform.platform())')"
-  echo "python=$(python -c 'import sys; print(sys.version.split()[0])')"
-  echo "torch=$(python -c 'import torch; print(torch.__version__)')"
-  echo "transformers=$(python -c 'import transformers; print(transformers.__version__)')"
+  echo "platform=$(${PY} -c 'import platform; print(platform.platform())')"
+  echo "python=$(${PY} -c 'import sys; print(sys.version.split()[0])')"
+  echo "torch=$(${PY} -c 'import torch; print(torch.__version__)')"
+  echo "transformers=$(${PY} -c 'import transformers; print(transformers.__version__)')"
 
   if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "git_sha=$(git rev-parse --short HEAD)"
@@ -82,11 +105,12 @@ run_prefill_decode () {
   fi
 
   local fn="${OUT_DIR}/torch_prefill_decode__${variant}__pl${pl}__nt${nt}__run${run}.txt"
-  PYTHONPATH=. python -u benches/torch_prefill_decode.py \
+  PYTHONPATH=. ${PY} -u benches/torch_prefill_decode.py \
     --model "${MODEL}" \
     --device "${DEVICE}" --dtype "${DTYPE}" --attn "${ATTN}" \
     --prompt-len "${pl}" --new-tokens "${nt}" \
     --warmup "${WARMUP}" \
+    --warmup-decode-tokens "${WARMUP_DECODE_TOKENS}" \
     "${extra[@]+"${extra[@]}"}" | tee "${fn}" >/dev/null
 }
 
@@ -103,36 +127,40 @@ run_cache_generate () {
   fi
 
   local fn="${OUT_DIR}/torch_cache_generate__${variant}__cache${cache}__pl${pl}__nt${nt}__run${run}.txt"
-  PYTHONPATH=. python -u benches/torch_cache_generate.py \
+  PYTHONPATH=. ${PY} -u benches/torch_cache_generate.py \
     --model "${MODEL}" \
     --device "${DEVICE}" --dtype "${DTYPE}" --attn "${ATTN}" \
     --prompt-len "${pl}" --new-tokens "${nt}" \
     --cache-impl "${cache}" \
-    --warmup 1 \
+    --warmup "${WARMUP}" \
     "${extra[@]+"${extra[@]}"}" | tee "${fn}" >/dev/null
 }
 
 for pl in "${PROMPT_LENS[@]}"; do
   for nt in "${NEW_TOKENS_LIST[@]}"; do
-    for run in $(seq 1 "${RUNS}"); do
-      progress_pair "prefill_decode pl=${pl} nt=${nt} run=${run}"
-      echo "  -> baseline"
-      run_prefill_decode baseline "${pl}" "${nt}" "${run}"
-
-      echo "  -> gqa"
-      run_prefill_decode gqa "${pl}" "${nt}" "${run}"
-    done
-
-    for cache in "${CACHE_IMPLS[@]}"; do
+    if has_bench prefill_decode; then
       for run in $(seq 1 "${RUNS}"); do
-        progress_pair "cache_generate cache=${cache} pl=${pl} nt=${nt} run=${run}"
+        progress_pair "prefill_decode pl=${pl} nt=${nt} run=${run}"
         echo "  -> baseline"
-        run_cache_generate baseline "${cache}" "${pl}" "${nt}" "${run}"
+        run_prefill_decode baseline "${pl}" "${nt}" "${run}"
 
         echo "  -> gqa"
-        run_cache_generate gqa "${cache}" "${pl}" "${nt}" "${run}"
+        run_prefill_decode gqa "${pl}" "${nt}" "${run}"
       done
-    done
+    fi
+
+    if has_bench cache_generate; then
+      for cache in "${CACHE_IMPLS[@]}"; do
+        for run in $(seq 1 "${RUNS}"); do
+          progress_pair "cache_generate cache=${cache} pl=${pl} nt=${nt} run=${run}"
+          echo "  -> baseline"
+          run_cache_generate baseline "${cache}" "${pl}" "${nt}" "${run}"
+
+          echo "  -> gqa"
+          run_cache_generate gqa "${cache}" "${pl}" "${nt}" "${run}"
+        done
+      done
+    fi
   done
 done
 

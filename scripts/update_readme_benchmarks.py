@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from typing import List
 import argparse
 import csv
 import subprocess
@@ -37,6 +38,23 @@ def _med(vals: list[float]) -> float:
     if not vals:
         raise ValueError("median() called with empty list")
     return float(median(vals))
+
+def _split_md_row(line: str) -> list[str]:
+    # "| a | b |" -> ["a","b"]
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+def _join_md_row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+def _normalize_md_row(line: str, ncols: int) -> str | None:
+    if not line.strip().startswith("|"):
+        return None
+    cells = _split_md_row(line)
+    if len(cells) < ncols:
+        cells = cells + [""] * (ncols - len(cells))
+    elif len(cells) > ncols:
+        cells = cells[:ncols]
+    return _join_md_row(cells)
 
 def _available_cache_generate(rows: list[dict[str, str]]) -> list[tuple[str, int, int]]:
     """
@@ -268,6 +286,7 @@ def main() -> int:
         "prefill ms (base) | prefill ms (gqa) | prefill speedup | git |\n"
     )
     align = "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+    expected_cols = len(_split_md_row(header))
 
     sec_lines = [ln for ln in section.strip("\n").splitlines() if ln.strip()]
 
@@ -278,20 +297,31 @@ def main() -> int:
         new_lines = [header.rstrip("\n"), align.rstrip("\n"), row_line]
     else:
         # Replace existing row if run already present, else insert after header+align.
-        body = sec_lines[:]
+        # Normalize existing table rows to the current schema (handles future column additions).
+        old_body = sec_lines[:]
+
+        norm_body: list[str] = []
+        # keep only header+align from CURRENT schema, normalize data rows
+        for ln in old_body[2:]:
+            n = _normalize_md_row(ln, expected_cols)
+            if n:
+                norm_body.append(n)
+
+        # Replace existing row if run already present, else insert at top.
+        body = norm_body[:]
+
         replaced = False
         for i, ln in enumerate(body):
             if f"[{args.run_id}]" in ln:
-                body[i] = row_line
+                body[i] = _normalize_md_row(row_line, expected_cols) or row_line
                 replaced = True
                 break
 
         if not replaced:
-            insert_at = 2 if len(body) >= 2 else len(body)
-            body.insert(insert_at, row_line)
+            body.insert(0, _normalize_md_row(row_line, expected_cols) or row_line)
 
-        new_lines = body
-
+        new_lines = [header.rstrip("\n"), align.rstrip("\n")] + body
+        
     new_section = "\n".join(new_lines) + "\n"
 
     new_text = pre + START + "\n" + new_section + END + post
